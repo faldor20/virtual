@@ -9,13 +9,13 @@ import {
 } from '@tanstack/virtual-core'
 
 import {
-  createComputed,
+  createEffect,
   createSignal,
-  mergeProps,
-  onCleanup,
-  onMount,
+  createStore,
+  merge,
+  onSettled,
+  reconcile,
 } from 'solid-js'
-import { createStore, reconcile } from 'solid-js/store'
 import type { PartialKeys, VirtualizerOptions } from '@tanstack/virtual-core'
 
 export * from '@tanstack/virtual-core'
@@ -27,7 +27,7 @@ function createVirtualizerBase<
   options: VirtualizerOptions<TScrollElement, TItemElement>,
 ): Virtualizer<TScrollElement, TItemElement> {
   const resolvedOptions: VirtualizerOptions<TScrollElement, TItemElement> =
-    mergeProps(options)
+    merge(options)
 
   const instance = new Virtualizer<TScrollElement, TItemElement>(
     resolvedOptions,
@@ -57,32 +57,33 @@ function createVirtualizerBase<
   const virtualizer = new Proxy(instance, handler)
   virtualizer.setOptions(resolvedOptions)
 
-  onMount(() => {
+  onSettled(() => {
     const cleanup = virtualizer._didMount()
     virtualizer._willUpdate()
-    onCleanup(cleanup)
+    return cleanup
   })
 
-  createComputed(() => {
-    virtualizer.setOptions(
-      mergeProps(resolvedOptions, options, {
+  createEffect(
+    () => ({
+      ...merge(resolvedOptions, options, {
         onChange: (
           instance: Virtualizer<TScrollElement, TItemElement>,
           sync: boolean,
         ) => {
           instance._willUpdate()
-          setVirtualItems(
-            reconcile(instance.getVirtualItems(), {
-              key: 'index',
-            }),
-          )
+          setVirtualItems(s => {
+            reconcile(instance.getVirtualItems(), 'index')(s)
+          })
           setTotalSize(instance.getTotalSize())
           options.onChange?.(instance, sync)
         },
       }),
-    )
-    virtualizer.measure()
-  })
+    }),
+    (resolved) => {
+      virtualizer.setOptions(resolved)
+      virtualizer.measure()
+    },
+  )
 
   return virtualizer
 }
@@ -97,7 +98,7 @@ export function createVirtualizer<
   >,
 ): Virtualizer<TScrollElement, TItemElement> {
   return createVirtualizerBase<TScrollElement, TItemElement>(
-    mergeProps(
+    merge(
       {
         observeElementRect: observeElementRect,
         observeElementOffset: observeElementOffset,
@@ -118,7 +119,7 @@ export function createWindowVirtualizer<TItemElement extends Element>(
   >,
 ): Virtualizer<Window, TItemElement> {
   return createVirtualizerBase<Window, TItemElement>(
-    mergeProps(
+    merge(
       {
         getScrollElement: () =>
           typeof document !== 'undefined' ? window : null,
