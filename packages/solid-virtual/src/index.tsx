@@ -74,7 +74,16 @@ function createVirtualizerBase<
     instance._willUpdate()
     runWithOwner(null, () => {
       setVirtualItems(s => {
-        reconcile(instance.getVirtualItems(), 'index')(s)
+        // Reconcile by `key`, NOT `index`. Consumers key their `<For>` by the
+        // item's `key` (a stable per-row id). Index-keyed reconcile rewrites the
+        // `key` field IN PLACE on every store row at/after a mid-list insert, so a
+        // key-keyed `<For>` sees a row's key detach from its store-row identity and
+        // reattach on the neighbour → it disposes + recreates that child (tearing
+        // out its DOM, e.g. re-decoding an <img> → a visible flash on insert-above).
+        // Keying the reconcile by the same field the `<For>` keys by makes an
+        // insert a pure reorder of stable-identity rows. Item keys are unique within
+        // a window (required by both reconcile and keyed `<For>`).
+        reconcile(instance.getVirtualItems(), 'key')(s)
       })
       setTotalSize(instance.getTotalSize())
     })
