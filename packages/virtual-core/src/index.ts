@@ -1519,13 +1519,19 @@ export class Virtualizer<
               delta,
               this,
             )
-          : // Default: adjust when the resize is an above-viewport item.
+          : // Default: adjust when the resized item sits ENTIRELY above the
+            // viewport — only then does its growth displace the visible
+            // content. An item that merely STARTS above the offset can
+            // straddle the viewport and grow below it (e.g. a tall row
+            // appending content at its bottom); shifting by the delta there
+            // throws the view past the growth instead of holding it steady.
             // First measurement (!has(key)): always adjust — the item
             // has never been sized, so the estimate→actual delta must
             // be compensated regardless of scroll direction.
             // Re-measurement (has(key)): skip during backward scroll
             // to avoid the "items jump while scrolling up" cascade.
-            itemStart < this.getScrollOffset() + this.scrollAdjustments &&
+            itemStart + cachedSize <=
+              this.getScrollOffset() + this.scrollAdjustments &&
             (!this.itemSizeCache.has(key) ||
               this.scrollDirection !== 'backward'))
 
