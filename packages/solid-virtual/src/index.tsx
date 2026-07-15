@@ -164,6 +164,7 @@ function createVirtualizerBase<
   const reObserveAndMeasureLive = (
     instance: Virtualizer<TScrollElement, TItemElement>,
   ) => {
+    const start = performance.now()
     const internals = instance as unknown as MeasureInternals
     const scrollEl = internals.scrollElement
     if (!scrollEl || !('querySelectorAll' in scrollEl)) return
@@ -172,14 +173,25 @@ function createVirtualizerBase<
     const nodes = (scrollEl as Element).querySelectorAll<HTMLElement>(
       `[${attr}]`,
     )
+    let offsetReads = 0
     for (const node of nodes) {
       // Register/observe under the node's CURRENT key (idempotent if already so).
       instance.measureElement(node as unknown as TItemElement)
       const index = internals.indexFromElement(node as unknown as TItemElement)
       if (index < 0) continue
       const size = node[horizontal ? 'offsetWidth' : 'offsetHeight']
+      offsetReads++
       instance.resizeItem(index, size)
     }
+    // Outlier custom track (Chrome DevTools Performance → Show custom tracks).
+    console.timeStamp(
+      `reObserveAndMeasureLive n=${offsetReads}`,
+      start,
+      performance.now(),
+      'Virtualizer',
+      'Outlier',
+      'primary',
+    )
   }
 
   // Whether the options effect has applied yet. The very first apply uses a real
@@ -204,9 +216,27 @@ function createVirtualizerBase<
       virtualizer.setOptions(resolved)
       if (!applied) {
         applied = true
+        const t0 = performance.now()
         virtualizer.measure()
+        console.timeStamp(
+          'options-effect measure (first)',
+          t0,
+          performance.now(),
+          'Virtualizer',
+          'Outlier',
+          'secondary',
+        )
       } else {
+        const t0 = performance.now()
         reLayoutPreservingSizes(virtualizer)
+        console.timeStamp(
+          'options-effect relayout',
+          t0,
+          performance.now(),
+          'Virtualizer',
+          'Outlier',
+          'secondary',
+        )
         // After the DOM settles the reindexed `data-index` attributes, re-observe
         // + re-read every rendered row's live box so a reused/grown/unobserved
         // row's size lands on its CURRENT key (resizeItem notifies → commit on
