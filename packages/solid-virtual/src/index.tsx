@@ -142,10 +142,16 @@ function createVirtualizerBase<
   type MeasureInternals = {
     pendingMin: number | null
     itemSizeCacheVersion: number
+    itemSizeCache: Map<unknown, number>
+    elementsCache: Map<unknown, Element>
     notify: (sync: boolean) => void
     indexFromElement: (node: TItemElement) => number
     scrollElement: Element | Window | null
-    options: { horizontal?: boolean; indexAttribute?: string }
+    options: {
+      horizontal?: boolean
+      indexAttribute?: string
+      getItemKey: (index: number) => unknown
+    }
   }
   const reLayoutPreservingSizes = (
     instance: Virtualizer<TScrollElement, TItemElement>,
@@ -162,19 +168,16 @@ function createVirtualizerBase<
   // reuses the same DOM nodes but shifts their `data-index`. The consumer's
   // per-row `measureElement(node)` call fires DURING the reindex flush, when the
   // node's `data-index` attribute and the intended key are momentarily desynced
-  // — so a reused row can fail to (re)register under its correct key and end up
+  // so a reused row can fail to (re)register under its correct key and end up
   // unobserved entirely. That row's later growth (e.g. a journal header whose
   // Backlinks panel renders late) then never fires a ResizeObserver, and its
   // stale size strands the offsets of every row after it (overlap).
   //
-  // After the DOM settles (microtask — Solid has committed the new `data-index`
-  // attributes by then), we walk the live rendered rows by `data-index`,
-  // (re-)register each with `measureElement` (which observes the node under its
-  // current key), and write its LIVE box to that index via `resizeItem`. We read
-  // the box directly (offsetHeight/Width) because virtual-core's default
-  // `measureElement(node)` short-circuits to the cached size when there's no RO
-  // entry, so it can't correct an already-cached row. `resizeItem` no-ops on an
-  // unchanged size, so this is cheap when nothing moved.
+  // Scheduled on rAF (not a click microtask): a sync offsetHeight after a large
+  // Solid flush forces style+layout of the whole dirty tree still attributed to
+  // the click. Re-bind RO first; only force-read geometry when the key is new or
+  // the node was not already bound under that key (RO owns later growth).
+  // `resizeItem` no-ops on an unchanged size.
   const reObserveAndMeasureLive = (
     instance: Virtualizer<TScrollElement, TItemElement>,
   ) => {
@@ -189,15 +192,23 @@ function createVirtualizerBase<
     )
     let offsetReads = 0
     for (const node of nodes) {
+      const index = internals.indexFromElement(node as unknown as TItemElement)
+      if (index < 0) {
+        instance.measureElement(node as unknown as TItemElement)
+        continue
+      }
+      const key = internals.options.getItemKey(index)
+      const alreadyBound = internals.elementsCache.get(key) === node
+      const hasSize = internals.itemSizeCache.has(key)
       // Register/observe under the node's CURRENT key (idempotent if already so).
       instance.measureElement(node as unknown as TItemElement)
-      const index = internals.indexFromElement(node as unknown as TItemElement)
-      if (index < 0) continue
+      // Same node + same key already measured: RO owns growth; skip forced layout.
+      if (alreadyBound && hasSize) continue
       const size = node[horizontal ? 'offsetWidth' : 'offsetHeight']
       offsetReads++
       instance.resizeItem(index, size)
     }
-    // Outlier custom track (Chrome DevTools Performance → Show custom tracks).
+    // Outlier custom track (Chrome DevTools Performance -> Show custom tracks).
     timeStamp(
       `reObserveAndMeasureLive n=${offsetReads}`,
       start,
@@ -213,6 +224,8 @@ function createVirtualizerBase<
   // notify drives initial scroll-wiring + first paint. Subsequent applies (rows
   // added/removed, scrollMargin change, etc.) preserve measured sizes.
   let applied = false
+  // Coalesce options-effect remeasures when count/options churn within one frame.
+  let reObserveRaf = 0
 
   createEffect(
     () => ({
@@ -251,11 +264,13 @@ function createVirtualizerBase<
           'Outlier',
           'secondary',
         )
-        // After the DOM settles the reindexed `data-index` attributes, re-observe
-        // + re-read every rendered row's live box so a reused/grown/unobserved
-        // row's size lands on its CURRENT key (resizeItem notifies → commit on
-        // any real change).
-        queueMicrotask(() => reObserveAndMeasureLive(virtualizer))
+        // After paint: data-index is settled; avoid forced layout on the click
+        // microtask (see reObserveAndMeasureLive).
+        if (reObserveRaf) return
+        reObserveRaf = requestAnimationFrame(() => {
+          reObserveRaf = 0
+          reObserveAndMeasureLive(virtualizer)
+        })
       }
     },
   )
