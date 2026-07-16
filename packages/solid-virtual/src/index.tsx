@@ -21,6 +21,20 @@ import type { PartialKeys, VirtualizerOptions } from '@tanstack/virtual-core'
 
 export * from '@tanstack/virtual-core'
 
+// Chrome DevTools Performance custom tracks — no-op under Node (no console.timeStamp).
+function timeStamp(
+  label: string,
+  start: number,
+  end: number,
+  track: string,
+  group: string,
+  color: string,
+): void {
+  if (typeof console.timeStamp === 'function') {
+    console.timeStamp(label, start, end, track, group, color)
+  }
+}
+
 function createVirtualizerBase<
   TScrollElement extends Element | Window,
   TItemElement extends Element,
@@ -184,7 +198,7 @@ function createVirtualizerBase<
       instance.resizeItem(index, size)
     }
     // Outlier custom track (Chrome DevTools Performance → Show custom tracks).
-    console.timeStamp(
+    timeStamp(
       `reObserveAndMeasureLive n=${offsetReads}`,
       start,
       performance.now(),
@@ -218,7 +232,7 @@ function createVirtualizerBase<
         applied = true
         const t0 = performance.now()
         virtualizer.measure()
-        console.timeStamp(
+        timeStamp(
           'options-effect measure (first)',
           t0,
           performance.now(),
@@ -229,7 +243,7 @@ function createVirtualizerBase<
       } else {
         const t0 = performance.now()
         reLayoutPreservingSizes(virtualizer)
-        console.timeStamp(
+        timeStamp(
           'options-effect relayout',
           t0,
           performance.now(),
