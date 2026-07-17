@@ -18,6 +18,11 @@ import {
   runWithOwner,
 } from 'solid-js'
 import type { PartialKeys, VirtualizerOptions } from '@tanstack/virtual-core'
+import {
+  countVirtualRelayout,
+  recordVirtualRelayout,
+  virtualizerInstanceId,
+} from '../../../../../src/perf/virtualRelayout'
 
 export * from '@tanstack/virtual-core'
 
@@ -28,7 +33,7 @@ function timeStamp(
   end: number,
   track: string,
   group: string,
-  color: string,
+  color: DevToolsTimeStampColor,
 ): void {
   if (typeof console.timeStamp === 'function') {
     console.timeStamp(label, start, end, track, group, color)
@@ -47,6 +52,7 @@ function createVirtualizerBase<
   const instance = new Virtualizer<TScrollElement, TItemElement>(
     resolvedOptions,
   )
+  const diagnosticsId = virtualizerInstanceId(instance)
 
   const [virtualItems, setVirtualItems] = createStore(
     instance.getVirtualItems(),
@@ -156,6 +162,7 @@ function createVirtualizerBase<
   const reLayoutPreservingSizes = (
     instance: Virtualizer<TScrollElement, TItemElement>,
   ) => {
+    countVirtualRelayout('virtualizer.preserveSizeRelayout')
     const internals = instance as unknown as MeasureInternals
     internals.pendingMin = null
     internals.itemSizeCacheVersion++
@@ -184,7 +191,17 @@ function createVirtualizerBase<
     const start = performance.now()
     const internals = instance as unknown as MeasureInternals
     const scrollEl = internals.scrollElement
-    if (!scrollEl || !('querySelectorAll' in scrollEl)) return
+    if (!scrollEl || !('querySelectorAll' in scrollEl)) {
+      const duration = performance.now() - start
+      recordVirtualRelayout('virtualizer.reObserveAndMeasureLive', {
+        source: 'virtualizer',
+        kind: 'reObserveAndMeasureLive',
+        instanceId: diagnosticsId,
+        forcedOffsetReads: 0,
+        duration,
+      })
+      return
+    }
     const horizontal = internals.options.horizontal === true
     const attr = internals.options.indexAttribute ?? 'data-index'
     const nodes = (scrollEl as Element).querySelectorAll<HTMLElement>(
@@ -192,6 +209,25 @@ function createVirtualizerBase<
     )
     let offsetReads = 0
     for (const node of nodes) {
+      // Nested virtualizers (QueryTable, …) can share this scroll root. Their
+      // items may also stamp an index attribute; measuring them here maps their
+      // heights onto THIS instance's getItemKey(index) and permanently poisons
+      // outer row sizes (stuck overlap until reload). Nested lists must use a
+      // distinct indexAttribute; also skip any node under a descendant
+      // [data-virtual] host (table body rows, etc.).
+      let nested = false
+      for (
+        let parent = node.parentElement;
+        parent && parent !== scrollEl;
+        parent = parent.parentElement
+      ) {
+        if (parent.hasAttribute('data-virtual')) {
+          nested = true
+          break
+        }
+      }
+      if (nested) continue
+
       const index = internals.indexFromElement(node as unknown as TItemElement)
       if (index < 0) {
         instance.measureElement(node as unknown as TItemElement)
@@ -210,13 +246,20 @@ function createVirtualizerBase<
     }
     // Outlier custom track (Chrome DevTools Performance -> Show custom tracks).
     timeStamp(
-      `reObserveAndMeasureLive n=${offsetReads}`,
+      `reObserveAndMeasureLive id=${diagnosticsId} n=${offsetReads}`,
       start,
       performance.now(),
       'Virtualizer',
       'Outlier',
       'primary',
     )
+    recordVirtualRelayout('virtualizer.reObserveAndMeasureLive', {
+      source: 'virtualizer',
+      kind: 'reObserveAndMeasureLive',
+      instanceId: diagnosticsId,
+      forcedOffsetReads: offsetReads,
+      duration: performance.now() - start,
+    })
   }
 
   // Whether the options effect has applied yet. The very first apply uses a real
@@ -224,6 +267,8 @@ function createVirtualizerBase<
   // notify drives initial scroll-wiring + first paint. Subsequent applies (rows
   // added/removed, scrollMargin change, etc.) preserve measured sizes.
   let applied = false
+  let previousCount: number | undefined
+  let previousScrollMargin: number | undefined
   // Coalesce options-effect remeasures when count/options churn within one frame.
   let reObserveRaf = 0
 
@@ -240,13 +285,33 @@ function createVirtualizerBase<
       }),
     }),
     (resolved) => {
+      const currentCount = resolved.count
+      const currentScrollMargin = resolved.scrollMargin ?? 0
+      const priorCount = previousCount
+      const priorScrollMargin = previousScrollMargin
+      const unchanged = priorCount === currentCount && priorScrollMargin === currentScrollMargin
+      previousCount = currentCount
+      previousScrollMargin = currentScrollMargin
       virtualizer.setOptions(resolved)
       if (!applied) {
         applied = true
         const t0 = performance.now()
         virtualizer.measure()
+        recordVirtualRelayout('virtualizer.optionsEffectFirstMeasure', {
+          source: 'virtualizer',
+          kind: 'optionsEffectFirstMeasure',
+          instanceId: diagnosticsId,
+          previousCount: priorCount,
+          currentCount,
+          previousScrollMargin: priorScrollMargin,
+          currentScrollMargin,
+          overscan: resolved.overscan,
+          countChanged: true,
+          scrollMarginChanged: true,
+          duration: performance.now() - t0,
+        })
         timeStamp(
-          'options-effect measure (first)',
+          `options-effect measure (first) id=${diagnosticsId} count=${currentCount} margin=${currentScrollMargin}`,
           t0,
           performance.now(),
           'Virtualizer',
@@ -256,8 +321,21 @@ function createVirtualizerBase<
       } else {
         const t0 = performance.now()
         reLayoutPreservingSizes(virtualizer)
+        recordVirtualRelayout('virtualizer.optionsEffectPreservingRelayout', {
+          source: 'virtualizer',
+          kind: unchanged ? 'optionsEffectUnchanged' : 'optionsEffectPreservingRelayout',
+          instanceId: diagnosticsId,
+          previousCount: priorCount,
+          currentCount,
+          previousScrollMargin: priorScrollMargin,
+          currentScrollMargin,
+          overscan: resolved.overscan,
+          countChanged: priorCount !== currentCount,
+          scrollMarginChanged: priorScrollMargin !== currentScrollMargin,
+          duration: performance.now() - t0,
+        })
         timeStamp(
-          'options-effect relayout',
+          `options-effect relayout id=${diagnosticsId} count=${priorCount}->${currentCount} margin=${priorScrollMargin}->${currentScrollMargin}`,
           t0,
           performance.now(),
           'Virtualizer',
