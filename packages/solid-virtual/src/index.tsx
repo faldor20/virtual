@@ -237,9 +237,16 @@ function createVirtualizerBase<
       const alreadyBound = internals.elementsCache.get(key) === node
       const hasSize = internals.itemSizeCache.has(key)
       // Register/observe under the node's CURRENT key (idempotent if already so).
+      // options.measureElement + resizeItem run inside; that is the size source.
       instance.measureElement(node as unknown as TItemElement)
       // Same node + same key already measured: RO owns growth; skip forced layout.
       if (alreadyBound && hasSize) continue
+      // Key already sized but rebound to a new node after virtual remount:
+      // measureElement re-bound the RO. Do NOT force-overwrite with raw
+      // offsetHeight — nested virtual carriers often report ~header-only height
+      // before their body paints, which collapses scrollHeight and clamps Pane
+      // scrollTop to the table head.
+      if (hasSize) continue
       const size = node[horizontal ? 'offsetWidth' : 'offsetHeight']
       offsetReads++
       instance.resizeItem(index, size)
