@@ -26,6 +26,14 @@ import {
 
 export * from '@tanstack/virtual-core'
 
+type SolidVirtualizerOptions<
+  TScrollElement extends Element | Window,
+  TItemElement extends Element,
+> = VirtualizerOptions<TScrollElement, TItemElement> & {
+  /** Limits adapter re-observation when sibling virtualizers share a scroll root. */
+  getItemElements?: () => Iterable<TItemElement>
+}
+
 // Chrome DevTools Performance custom tracks — no-op under Node (no console.timeStamp).
 function timeStamp(
   label: string,
@@ -44,9 +52,9 @@ function createVirtualizerBase<
   TScrollElement extends Element | Window,
   TItemElement extends Element,
 >(
-  options: VirtualizerOptions<TScrollElement, TItemElement>,
+  options: SolidVirtualizerOptions<TScrollElement, TItemElement>,
 ): Virtualizer<TScrollElement, TItemElement> {
-  const resolvedOptions: VirtualizerOptions<TScrollElement, TItemElement> =
+  const resolvedOptions: SolidVirtualizerOptions<TScrollElement, TItemElement> =
     merge(options)
 
   const instance = new Virtualizer<TScrollElement, TItemElement>(
@@ -191,7 +199,11 @@ function createVirtualizerBase<
     const start = performance.now()
     const internals = instance as unknown as MeasureInternals
     const scrollEl = internals.scrollElement
-    if (!scrollEl || !('querySelectorAll' in scrollEl)) {
+    const scopedNodes = options.getItemElements?.()
+    if (
+      scopedNodes === undefined &&
+      (!scrollEl || !('querySelectorAll' in scrollEl))
+    ) {
       const duration = performance.now() - start
       recordVirtualRelayout('virtualizer.reObserveAndMeasureLive', {
         source: 'virtualizer',
@@ -204,17 +216,14 @@ function createVirtualizerBase<
     }
     const horizontal = internals.options.horizontal === true
     const attr = internals.options.indexAttribute ?? 'data-index'
-    const nodes = (scrollEl as Element).querySelectorAll<HTMLElement>(
-      `[${attr}]`,
-    )
+    const nodes =
+      scopedNodes ??
+      (scrollEl as Element).querySelectorAll<HTMLElement>(`[${attr}]`)
     let offsetReads = 0
     for (const node of nodes) {
-      // Nested virtualizers (QueryTable, …) can share this scroll root. Their
-      // items may also stamp an index attribute; measuring them here maps their
-      // heights onto THIS instance's getItemKey(index) and permanently poisons
-      // outer row sizes (stuck overlap until reload). Nested lists must use a
-      // distinct indexAttribute; also skip any node under a descendant
-      // [data-virtual] host (table body rows, etc.).
+      // Nested virtualizers can share this scroll root. Their items may stamp an
+      // index attribute, so callers with sibling streams must provide a scoped
+      // item source; still skip descendant virtual hosts for unscoped callers.
       let nested = false
       for (
         let parent = node.parentElement;
@@ -368,7 +377,7 @@ export function createVirtualizer<
   TItemElement extends Element,
 >(
   options: PartialKeys<
-    VirtualizerOptions<TScrollElement, TItemElement>,
+    SolidVirtualizerOptions<TScrollElement, TItemElement>,
     'observeElementRect' | 'observeElementOffset' | 'scrollToFn'
   >,
 ): Virtualizer<TScrollElement, TItemElement> {
@@ -386,7 +395,7 @@ export function createVirtualizer<
 
 export function createWindowVirtualizer<TItemElement extends Element>(
   options: PartialKeys<
-    VirtualizerOptions<Window, TItemElement>,
+    SolidVirtualizerOptions<Window, TItemElement>,
     | 'getScrollElement'
     | 'observeElementRect'
     | 'observeElementOffset'
