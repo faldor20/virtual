@@ -63,9 +63,11 @@ function createVirtualizerBase<
   // Shared scroll roots (pane-mode kanban/table islands all observe the Pane's
   // `.outline-scroll`). virtual-core's `_willUpdate` rebind path writes
   // `getScrollOffset()` — `initialOffset` 0 for a virgin instance — which
-  // clobbers a scrolled shared root. Seed/restore the live DOM offset around
-  // every willUpdate so nested virtualizers never zero the Pane.
+  // clobbers a scrolled shared root. Only that path (scroll element change)
+  // needs a live-offset seed/restore; count/margin updates keep the same
+  // element and must not force layout through a scrollTop read.
   type ScrollOffsetInternals = {
+    scrollElement: TScrollElement | null
     scrollOffset: number | null
     options: {
       horizontal?: boolean
@@ -95,9 +97,15 @@ function createVirtualizerBase<
   const rawWillUpdate = instance._willUpdate.bind(instance)
   instance._willUpdate = () => {
     const internals = instance as unknown as ScrollOffsetInternals
-    const el = internals.options.enabled
+    const nextScrollElement = internals.options.enabled
       ? internals.options.getScrollElement()
       : null
+    // Match virtual-core: only a scroll-element rebind can apply initialOffset.
+    if (internals.scrollElement === nextScrollElement) {
+      rawWillUpdate()
+      return
+    }
+    const el = nextScrollElement
     const before = el ? readLiveOffset(el) : null
     rawWillUpdate()
     if (before == null || before === 0 || !el) return
