@@ -60,6 +60,55 @@ function createVirtualizerBase<
   )
   const diagnosticsId = virtualizerInstanceId(instance)
 
+  // Shared scroll roots (pane-mode kanban/table islands all observe the Pane's
+  // `.outline-scroll`). virtual-core's `_willUpdate` rebind path writes
+  // `getScrollOffset()` — `initialOffset` 0 for a virgin instance — which
+  // clobbers a scrolled shared root. Seed/restore the live DOM offset around
+  // every willUpdate so nested virtualizers never zero the Pane.
+  type ScrollOffsetInternals = {
+    scrollOffset: number | null
+    options: {
+      horizontal?: boolean
+      enabled?: boolean
+      getScrollElement: () => TScrollElement | null
+    }
+  }
+  const readLiveOffset = (el: Element | Window): number | null => {
+    if (el instanceof Window) {
+      return instance.options.horizontal ? el.scrollX : el.scrollY
+    }
+    if (!('scrollTop' in el)) return null
+    const node = el as HTMLElement
+    return instance.options.horizontal ? node.scrollLeft : node.scrollTop
+  }
+  const writeLiveOffset = (el: Element | Window, offset: number): void => {
+    if (el instanceof Window) {
+      if (instance.options.horizontal) el.scrollTo(offset, el.scrollY)
+      else el.scrollTo(el.scrollX, offset)
+      return
+    }
+    if (!('scrollTop' in el)) return
+    const node = el as HTMLElement
+    if (instance.options.horizontal) node.scrollLeft = offset
+    else node.scrollTop = offset
+  }
+  const rawWillUpdate = instance._willUpdate.bind(instance)
+  instance._willUpdate = () => {
+    const internals = instance as unknown as ScrollOffsetInternals
+    const el = internals.options.enabled
+      ? internals.options.getScrollElement()
+      : null
+    const before = el ? readLiveOffset(el) : null
+    rawWillUpdate()
+    if (before == null || before === 0 || !el) return
+    const after = readLiveOffset(el)
+    // Only undo the virgin-initialOffset clobber (non-zero → 0), not a real
+    // programmatic scroll that happens to land near zero via other paths.
+    if (after !== 0) return
+    writeLiveOffset(el, before)
+    internals.scrollOffset = before
+  }
+
   // Publish one immutable range snapshot. Consumers already reconcile their DOM
   // by item key; deep store reconciliation here duplicated that keyed diff and
   // marked every changed field through Solid's store graph on each scroll frame.
