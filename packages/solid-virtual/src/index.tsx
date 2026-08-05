@@ -11,10 +11,8 @@ import {
 import {
   createEffect,
   createSignal,
-  createStore,
   merge,
   onSettled,
-  reconcile,
   runWithOwner,
 } from 'solid-js'
 import type { PartialKeys, VirtualizerOptions } from '@tanstack/virtual-core'
@@ -62,7 +60,10 @@ function createVirtualizerBase<
   )
   const diagnosticsId = virtualizerInstanceId(instance)
 
-  const [virtualItems, setVirtualItems] = createStore(
+  // Publish one immutable range snapshot. Consumers already reconcile their DOM
+  // by item key; deep store reconciliation here duplicated that keyed diff and
+  // marked every changed field through Solid's store graph on each scroll frame.
+  const [virtualItems, setVirtualItems] = createSignal(
     instance.getVirtualItems(),
   )
   const [totalSize, setTotalSize] = createSignal(instance.getTotalSize())
@@ -74,7 +75,7 @@ function createVirtualizerBase<
     ) {
       switch (prop) {
         case 'getVirtualItems':
-          return () => virtualItems
+          return () => virtualItems()
         case 'getTotalSize':
           return () => totalSize()
         default:
@@ -86,7 +87,7 @@ function createVirtualizerBase<
   const virtualizer = new Proxy(instance, handler)
   virtualizer.setOptions(resolvedOptions)
 
-  // Commit virtual-core's latest items/total-size into the reactive store.
+  // Commit virtual-core's latest immutable range/total-size snapshot.
   //
   // virtual-core's `onChange` can fire synchronously from inside an owned
   // reactive scope (the options effect's apply phase calls `measure()`, which
@@ -101,18 +102,7 @@ function createVirtualizerBase<
   const commit = (instance: Virtualizer<TScrollElement, TItemElement>) => {
     instance._willUpdate()
     runWithOwner(null, () => {
-      setVirtualItems(s => {
-        // Reconcile by `key`, NOT `index`. Consumers key their `<For>` by the
-        // item's `key` (a stable per-row id). Index-keyed reconcile rewrites the
-        // `key` field IN PLACE on every store row at/after a mid-list insert, so a
-        // key-keyed `<For>` sees a row's key detach from its store-row identity and
-        // reattach on the neighbour → it disposes + recreates that child (tearing
-        // out its DOM, e.g. re-decoding an <img> → a visible flash on insert-above).
-        // Keying the reconcile by the same field the `<For>` keys by makes an
-        // insert a pure reorder of stable-identity rows. Item keys are unique within
-        // a window (required by both reconcile and keyed `<For>`).
-        reconcile(instance.getVirtualItems(), 'key')(s)
-      })
+      setVirtualItems(instance.getVirtualItems())
       setTotalSize(instance.getTotalSize())
     })
   }
