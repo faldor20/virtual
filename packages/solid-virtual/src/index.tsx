@@ -32,6 +32,17 @@ type SolidVirtualizerOptions<
   getItemElements?: () => Iterable<TItemElement>
 }
 
+type DevToolsConsole = Console & {
+  timeStamp(
+    label: string,
+    start: number,
+    end: number,
+    track: string,
+    group: string,
+    color: string,
+  ): void
+}
+
 // Chrome DevTools Performance custom tracks — no-op under Node (no console.timeStamp).
 function timeStamp(
   label: string,
@@ -39,10 +50,11 @@ function timeStamp(
   end: number,
   track: string,
   group: string,
-  color: DevToolsTimeStampColor,
+  color: string,
 ): void {
-  if (typeof console.timeStamp === 'function') {
-    console.timeStamp(label, start, end, track, group, color)
+  const devToolsConsole = console as DevToolsConsole
+  if (typeof devToolsConsole.timeStamp === 'function') {
+    devToolsConsole.timeStamp(label, start, end, track, group, color)
   }
 }
 
@@ -75,8 +87,10 @@ function createVirtualizerBase<
       getScrollElement: () => TScrollElement | null
     }
   }
+  const isWindow = (el: Element | Window): el is Window =>
+    typeof Window !== 'undefined' && el instanceof Window
   const readLiveOffset = (el: Element | Window): number | null => {
-    if (el instanceof Window) {
+    if (isWindow(el)) {
       return instance.options.horizontal ? el.scrollX : el.scrollY
     }
     if (!('scrollTop' in el)) return null
@@ -84,7 +98,7 @@ function createVirtualizerBase<
     return instance.options.horizontal ? node.scrollLeft : node.scrollTop
   }
   const writeLiveOffset = (el: Element | Window, offset: number): void => {
-    if (el instanceof Window) {
+    if (isWindow(el)) {
       if (instance.options.horizontal) el.scrollTo(offset, el.scrollY)
       else el.scrollTo(el.scrollX, offset)
       return
@@ -303,7 +317,11 @@ function createVirtualizerBase<
       // before their body paints, which collapses scrollHeight and clamps Pane
       // scrollTop to the table head.
       if (hasSize) continue
-      const size = node[horizontal ? 'offsetWidth' : 'offsetHeight']
+      const dimension = horizontal ? 'offsetWidth' : 'offsetHeight'
+      // SVG/custom item elements have no offset box; their configured
+      // measureElement callback remains the size authority.
+      if (!(dimension in node)) continue
+      const size = (node as HTMLElement)[dimension]
       offsetReads++
       instance.resizeItem(index, size)
     }
