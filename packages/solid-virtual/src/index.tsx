@@ -24,158 +24,6 @@ import {
 
 export * from '@tanstack/virtual-core'
 
-/**
- * Behavioral operations over a Solid virtualizer instance.
- * App code must use these instead of reading or mutating TanStack caches.
- * Index operations verify `getItemKey(index)` when an expected key is supplied.
- * Callers reject stale Pane generations before invoking the instance.
- */
-export interface SolidVirtualizerBehavior<Key = unknown> {
-  relayoutPreservingMeasurements(reason?: string): void
-  remeasureMounted(): number
-  itemBounds(
-    index: number,
-    expectedKey?: Key,
-  ): { start: number; end: number; size: number } | undefined
-  hasMeasuredSize(key: Key): boolean
-  measuredOrEstimatedSize(index: number, expectedKey: Key): number | undefined
-  seedMeasuredSize(index: number, expectedKey: Key, size: number): boolean
-  detachMeasuredSize(key: Key, element?: Element): boolean
-  requestUpdate(): void
-}
-
-type MeasureInternals = {
-  pendingMin: number | null
-  itemSizeCacheVersion: number
-  itemSizeCache: Map<unknown, number>
-  measurementsCache: Array<{
-    key: unknown
-    start: number
-    end: number
-    size: number
-  }>
-  elementsCache: Map<unknown, Element>
-  observer: { unobserve(el: Element): void }
-  notify: (sync: boolean) => void
-  indexFromElement: (node: Element) => number
-  scrollElement: Element | Window | null
-  options: {
-    horizontal?: boolean
-    indexAttribute?: string
-    getItemKey: (index: number) => unknown
-    estimateSize: (index: number) => number
-  }
-}
-
-const behaviors = new WeakMap<
-  Virtualizer<any, any>,
-  SolidVirtualizerBehavior<any>
->()
-
-function sameKey(a: unknown, b: unknown): boolean {
-  return Object.is(a, b)
-}
-
-function createSolidVirtualizerBehavior<Key>(
-  instance: Virtualizer<any, any>,
-): SolidVirtualizerBehavior<Key> {
-  const internals = instance as unknown as MeasureInternals
-
-  const currentKey = (index: number): unknown | undefined => {
-    const getItemKey = internals.options?.getItemKey
-    if (!getItemKey) return undefined
-    try {
-      return getItemKey(index)
-    } catch {
-      return undefined
-    }
-  }
-
-  const keyMatches = (index: number, expectedKey?: Key): boolean => {
-    if (expectedKey === undefined) return true
-    return sameKey(currentKey(index), expectedKey)
-  }
-
-  return {
-    relayoutPreservingMeasurements(_reason) {
-      countVirtualRelayout('virtualizer.preserveSizeRelayout')
-      internals.pendingMin = null
-      internals.itemSizeCacheVersion++
-      internals.notify(false)
-    },
-
-    remeasureMounted() {
-      let offsetReads = 0
-      const cache = internals.elementsCache
-      if (!cache) return 0
-      for (const el of cache.values()) {
-        if (el.isConnected && el.hasAttribute('data-index')) {
-          instance.measureElement(el as any)
-          offsetReads++
-        }
-      }
-      return offsetReads
-    },
-
-    itemBounds(index, expectedKey) {
-      if (!keyMatches(index, expectedKey)) return undefined
-      const item = internals.measurementsCache?.[index]
-      if (!item) return undefined
-      if (expectedKey !== undefined && !sameKey(item.key, expectedKey)) {
-        return undefined
-      }
-      return { start: item.start, end: item.end, size: item.size }
-    },
-
-    hasMeasuredSize(key) {
-      return internals.itemSizeCache.has(key)
-    },
-
-    measuredOrEstimatedSize(index, expectedKey) {
-      if (!keyMatches(index, expectedKey)) return undefined
-      return (
-        internals.itemSizeCache.get(expectedKey) ??
-        internals.options.estimateSize(index)
-      )
-    },
-
-    seedMeasuredSize(index, expectedKey, size) {
-      if (!keyMatches(index, expectedKey)) return false
-      internals.itemSizeCache.set(expectedKey, size)
-      return true
-    },
-
-    detachMeasuredSize(key, element) {
-      let changed = internals.itemSizeCache.delete(key)
-      if (element) {
-        internals.observer.unobserve(element)
-        for (const [cacheKey, cached] of internals.elementsCache) {
-          if (cached === element) {
-            internals.elementsCache.delete(cacheKey)
-            changed = true
-          }
-        }
-      }
-      return changed
-    },
-
-    requestUpdate() {
-      instance._willUpdate()
-    },
-  }
-}
-
-/** Adapter-owned operations for a virtualizer. Safe to call on adapter instances and test fakes. */
-export function virtualizerBehavior<Key = unknown>(
-  virtualizer: Virtualizer<any, any>,
-): SolidVirtualizerBehavior<Key> {
-  const existing = behaviors.get(virtualizer)
-  if (existing) return existing as SolidVirtualizerBehavior<Key>
-  const created = createSolidVirtualizerBehavior<Key>(virtualizer)
-  behaviors.set(virtualizer, created)
-  return created
-}
-
 type SolidVirtualizerOptions<
   TScrollElement extends Element | Window,
   TItemElement extends Element,
@@ -309,9 +157,6 @@ function createVirtualizerBase<
 
   const virtualizer = new Proxy(instance, handler)
   virtualizer.setOptions(resolvedOptions)
-  const behavior = createSolidVirtualizerBehavior(instance)
-  behaviors.set(instance, behavior)
-  behaviors.set(virtualizer, behavior)
 
   // Commit virtual-core's latest immutable range/total-size snapshot.
   //
@@ -368,12 +213,29 @@ function createVirtualizerBase<
   //    measure() does, keeping that cycle armed.
   //
   // The fields/method are "private" only in the type; at runtime they're plain
-  // instance members (names preserved in the build). App code must go through
-  // `virtualizerBehavior` rather than repeating these casts.
+  // instance members (names preserved in the build).
+  type MeasureInternals = {
+    pendingMin: number | null
+    itemSizeCacheVersion: number
+    itemSizeCache: Map<unknown, number>
+    elementsCache: Map<unknown, Element>
+    notify: (sync: boolean) => void
+    indexFromElement: (node: TItemElement) => number
+    scrollElement: Element | Window | null
+    options: {
+      horizontal?: boolean
+      indexAttribute?: string
+      getItemKey: (index: number) => unknown
+    }
+  }
   const reLayoutPreservingSizes = (
-    target: Virtualizer<TScrollElement, TItemElement>,
+    instance: Virtualizer<TScrollElement, TItemElement>,
   ) => {
-    virtualizerBehavior(target).relayoutPreservingMeasurements()
+    countVirtualRelayout('virtualizer.preserveSizeRelayout')
+    const internals = instance as unknown as MeasureInternals
+    internals.pendingMin = null
+    internals.itemSizeCacheVersion++
+    internals.notify(false)
   }
 
   // Re-observe + re-measure every rendered row against its CURRENT index.
