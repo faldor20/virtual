@@ -122,11 +122,18 @@ function createVirtualizerBase<
     const el = nextScrollElement
     const before = el ? readLiveOffset(el) : null
     rawWillUpdate()
-    if (before == null || before === 0 || !el) return
+    if (before == null || before === 0 || !el) {
+      countVirtualRelayout('virtualizer.willUpdateSeedSkipped')
+      return
+    }
     const after = readLiveOffset(el)
     // Only undo the virgin-initialOffset clobber (non-zero → 0), not a real
     // programmatic scroll that happens to land near zero via other paths.
-    if (after !== 0) return
+    if (after !== 0) {
+      countVirtualRelayout('virtualizer.willUpdateSeedKept')
+      return
+    }
+    countVirtualRelayout('virtualizer.willUpdateSeedRestored')
     writeLiveOffset(el, before)
     internals.scrollOffset = before
   }
@@ -343,10 +350,12 @@ function createVirtualizerBase<
     })
   }
 
-  // Whether the options effect has applied yet. The very first apply uses a real
-  // measure() — its clear drops any stale initialMeasurementsCache seed and its
-  // notify drives initial scroll-wiring + first paint. Subsequent applies (rows
-  // added/removed, scrollMargin change, etc.) preserve measured sizes.
+  // Whether the options effect has applied yet. The very first apply paints
+  // from estimates (same preserving-relayout path as steady state) and takes
+  // real measurements on the next frame: a synchronous measure() here forces
+  // style+layout of the whole dirty mutation tree on the critical task (e.g. a
+  // query island mounting mid-delete). RO, bound by the rAF pass below, owns
+  // later growth — at most one corrective shift lands for tiny islands.
   let applied = false
   let previousCount: number | undefined
   let previousScrollMargin: number | undefined
@@ -377,10 +386,10 @@ function createVirtualizerBase<
       if (!applied) {
         applied = true
         const t0 = performance.now()
-        virtualizer.measure()
-        recordVirtualRelayout('virtualizer.optionsEffectFirstMeasure', {
+        reLayoutPreservingSizes(virtualizer)
+        recordVirtualRelayout('virtualizer.optionsEffectFirstEstimate', {
           source: 'virtualizer',
-          kind: 'optionsEffectFirstMeasure',
+          kind: 'optionsEffectFirstEstimate',
           instanceId: diagnosticsId,
           previousCount: priorCount,
           currentCount,
@@ -392,13 +401,23 @@ function createVirtualizerBase<
           duration: performance.now() - t0,
         })
         timeStamp(
-          `options-effect measure (first) id=${diagnosticsId} count=${currentCount} margin=${currentScrollMargin}`,
+          `options-effect estimate-first id=${diagnosticsId} count=${currentCount} margin=${currentScrollMargin}`,
           t0,
           performance.now(),
           'Virtualizer',
           'Outlier',
           'secondary',
         )
+        // Real measurement follows on the next frame (same philosophy as
+        // reObserveAndMeasureLive: geometry reads belong post-paint, not on
+        // the mutation task). Guarded: the steady-state branch below may have
+        // already scheduled this frame's pass.
+        if (!reObserveRaf) {
+          reObserveRaf = requestAnimationFrame(() => {
+            reObserveRaf = 0
+            reObserveAndMeasureLive(virtualizer)
+          })
+        }
       } else {
         const t0 = performance.now()
         reLayoutPreservingSizes(virtualizer)
