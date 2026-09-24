@@ -14,6 +14,7 @@ import {
   merge,
   onSettled,
   runWithOwner,
+  untrack,
 } from 'solid-js'
 import type { PartialKeys, VirtualizerOptions } from '@tanstack/virtual-core'
 import {
@@ -30,6 +31,17 @@ type SolidVirtualizerOptions<
 > = VirtualizerOptions<TScrollElement, TItemElement> & {
   /** Limits adapter re-observation when sibling virtualizers share a scroll root. */
   getItemElements?: () => Iterable<TItemElement>
+  /**
+   * Monotonic tick over every analytic-estimate input (sizer width, render
+   * version, tag layout, ...). When present, the options effect skips its
+   * preserving relayout while count, scroll margin, overscan, this version,
+   * the ordered item keys, and the scroll element all hold — the pane-layout
+   * relayoutKey guard, extended to this path so island-local deletes stop
+   * paying `relayout id=2 237->237`. Absent → never skip (current behavior).
+   * Read untracked in the apply phase: estimate changes must NOT resubscribe
+   * this effect (they already flow through the owner's remeasure path).
+   */
+  estimateVersion?: () => number
 }
 
 type DevToolsConsole = Console & {
@@ -359,6 +371,10 @@ function createVirtualizerBase<
   let applied = false
   let previousCount: number | undefined
   let previousScrollMargin: number | undefined
+  let previousOverscan: number | undefined
+  let previousEstimateVersion: number | undefined
+  let previousItemKeys: readonly unknown[] | undefined
+  let previousScrollElement: Element | Window | null | undefined
   // Coalesce options-effect remeasures when count/options churn within one frame.
   let reObserveRaf = 0
 
@@ -382,6 +398,59 @@ function createVirtualizerBase<
       const unchanged = priorCount === currentCount && priorScrollMargin === currentScrollMargin
       previousCount = currentCount
       previousScrollMargin = currentScrollMargin
+      // Untracked option probes for the layout-skip guard below. merge() copied
+      // the estimateVersion fn reference without calling it, so the compute
+      // never subscribed to the underlying signal — keep it that way.
+      const estimateVersionFn = resolved.estimateVersion
+      const nextEstimateVersion =
+        typeof estimateVersionFn === 'function'
+          ? untrack(() => estimateVersionFn())
+          : undefined
+      const getScrollElementFn = resolved.getScrollElement
+      const nextScrollElement =
+        typeof getScrollElementFn === 'function'
+          ? untrack(() => getScrollElementFn())
+          : null
+      const boundElement = (virtualizer as unknown as { scrollElement: Element | Window | null })
+        .scrollElement
+      // Pairwise key identity: a same-count reorder/replace must still rebuild
+      // offsets, so count equality alone never skips. Early exit on first move.
+      // No key fn → unprovable → never skip (conservative).
+      const getItemKeyFn = resolved.getItemKey
+      let keysMatch =
+        typeof getItemKeyFn === 'function' &&
+        previousItemKeys !== undefined &&
+        previousItemKeys.length === currentCount
+      if (typeof getItemKeyFn === 'function' && keysMatch) {
+        for (let i = 0; i < currentCount; i++) {
+          if (untrack(() => getItemKeyFn(i)) !== previousItemKeys![i]) {
+            keysMatch = false
+            break
+          }
+        }
+      }
+      // No estimate version, no skip: without the carrier-size guard staleness
+      // is unprovable (island virtualizers keep today's always-relayout path).
+      const layoutUnchanged =
+        unchanged &&
+        previousOverscan === resolved.overscan &&
+        nextEstimateVersion !== undefined &&
+        previousEstimateVersion === nextEstimateVersion &&
+        keysMatch &&
+        previousScrollElement !== undefined &&
+        previousScrollElement === nextScrollElement &&
+        boundElement === nextScrollElement
+      previousOverscan = resolved.overscan
+      previousEstimateVersion = nextEstimateVersion
+      if (!keysMatch) {
+        previousItemKeys =
+          typeof getItemKeyFn === 'function'
+            ? Array.from({ length: currentCount }, (_, i) =>
+                untrack(() => getItemKeyFn(i)),
+              )
+            : undefined
+      }
+      previousScrollElement = nextScrollElement
       virtualizer.setOptions(resolved)
       if (!applied) {
         applied = true
@@ -423,6 +492,34 @@ function createVirtualizerBase<
             reObserveAndMeasureLive(virtualizer)
           }
         }
+      } else if (layoutUnchanged) {
+        // Island-local work (or any same-keys/count/margin/estimate pass):
+        // measurements, keys, and estimates all hold, so there is nothing to
+        // rebuild and no reindex for RO to re-bind — skip the relayout and the
+        // rAF re-observe entirely. The instant marker proves the skip on re-trace.
+        recordVirtualRelayout('virtualizer.optionsEffectSkippedUnchanged', {
+          source: 'virtualizer',
+          kind: 'optionsEffectSkippedUnchanged',
+          instanceId: diagnosticsId,
+          previousCount: priorCount,
+          currentCount,
+          previousScrollMargin: priorScrollMargin,
+          currentScrollMargin,
+          overscan: resolved.overscan,
+          countChanged: false,
+          scrollMarginChanged: false,
+          estimateVersion: nextEstimateVersion,
+          duration: 0,
+        })
+        const tSkip = performance.now()
+        timeStamp(
+          `options-effect skipped id=${diagnosticsId} count=${currentCount}`,
+          tSkip,
+          tSkip,
+          'Virtualizer',
+          'Outlier',
+          'secondary',
+        )
       } else {
         const t0 = performance.now()
         reLayoutPreservingSizes(virtualizer)
@@ -437,6 +534,7 @@ function createVirtualizerBase<
           overscan: resolved.overscan,
           countChanged: priorCount !== currentCount,
           scrollMarginChanged: priorScrollMargin !== currentScrollMargin,
+          estimateVersion: nextEstimateVersion,
           duration: performance.now() - t0,
         })
         timeStamp(
