@@ -411,12 +411,17 @@ function createVirtualizerBase<
         // Real measurement follows on the next frame (same philosophy as
         // reObserveAndMeasureLive: geometry reads belong post-paint, not on
         // the mutation task). Guarded: the steady-state branch below may have
-        // already scheduled this frame's pass.
+        // already scheduled this frame's pass. No rAF (Node tests) → run the
+        // pass inline; with no scroll element it early-returns after recording.
         if (!reObserveRaf) {
-          reObserveRaf = requestAnimationFrame(() => {
-            reObserveRaf = 0
+          if (typeof requestAnimationFrame === "function") {
+            reObserveRaf = requestAnimationFrame(() => {
+              reObserveRaf = 0
+              reObserveAndMeasureLive(virtualizer)
+            })
+          } else {
             reObserveAndMeasureLive(virtualizer)
-          })
+          }
         }
       } else {
         const t0 = performance.now()
