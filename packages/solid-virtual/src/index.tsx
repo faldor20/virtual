@@ -12,6 +12,7 @@ import {
   createEffect,
   createSignal,
   merge,
+  onCleanup,
   onSettled,
   runWithOwner,
   untrack,
@@ -83,6 +84,14 @@ function createVirtualizerBase<
     resolvedOptions,
   )
   const diagnosticsId = virtualizerInstanceId(instance)
+  let disposed = false
+  const cleanup = instance._didMount()
+  // Offset observers can deliver their scrolling-stopped debounce after unmount.
+  // Never let that callback reattach this instance to a shared Pane scroll root.
+  onCleanup(() => {
+    disposed = true
+    cleanup()
+  })
 
   // Shared scroll roots (pane-mode kanban/table islands all observe the Pane's
   // `.outline-scroll`). virtual-core's `_willUpdate` rebind path writes
@@ -122,6 +131,7 @@ function createVirtualizerBase<
   }
   const rawWillUpdate = instance._willUpdate.bind(instance)
   instance._willUpdate = () => {
+    if (disposed) return
     const internals = instance as unknown as ScrollOffsetInternals
     const nextScrollElement = internals.options.enabled
       ? internals.options.getScrollElement()
@@ -198,9 +208,7 @@ function createVirtualizerBase<
   }
 
   onSettled(() => {
-    const cleanup = virtualizer._didMount()
     virtualizer._willUpdate()
-    return cleanup
   })
 
   // Re-layout on an options change WITHOUT throwing away dynamic measurements.
@@ -377,6 +385,9 @@ function createVirtualizerBase<
   let previousScrollElement: Element | Window | null | undefined
   // Coalesce options-effect remeasures when count/options churn within one frame.
   let reObserveRaf = 0
+  onCleanup(() => {
+    if (reObserveRaf) cancelAnimationFrame(reObserveRaf)
+  })
 
   createEffect(
     () => ({
@@ -385,6 +396,7 @@ function createVirtualizerBase<
           instance: Virtualizer<TScrollElement, TItemElement>,
           sync: boolean,
         ) => {
+          if (disposed) return
           commit(instance)
           options.onChange?.(instance, sync)
         },
