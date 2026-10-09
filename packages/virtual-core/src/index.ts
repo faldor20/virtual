@@ -1,5 +1,5 @@
 import { createLazyMeasurementsView } from './lazy-measurements'
-import { approxEqual, debounce, memo, notUndefined } from './utils'
+import { approxEqual, memo, notUndefined } from './utils'
 
 // Browser-aware iOS detection. Programmatic `scrollTo`/`scrollTop` writes
 // during a momentum-scroll cancel the momentum on iOS WebKit, so we defer
@@ -192,13 +192,16 @@ const observeOffset = <T extends Element | Window>(
     instance.options.useScrollendEvent && supportsScrollend
 
   let offset = 0
+  let timeoutId: number | undefined
   const fallback = registerScrollendEvent
     ? null
-    : debounce(
-        targetWindow,
-        () => cb(offset, false),
-        instance.options.isScrollingResetDelay,
-      )
+    : () => {
+        targetWindow.clearTimeout(timeoutId)
+        timeoutId = targetWindow.setTimeout(() => {
+          timeoutId = undefined
+          cb(offset, false)
+        }, instance.options.isScrollingResetDelay)
+      }
 
   const createHandler = (isScrolling: boolean) => () => {
     offset = readOffset(element)
@@ -213,6 +216,8 @@ const observeOffset = <T extends Element | Window>(
     element.addEventListener('scrollend', endHandler, addEventListenerOptions)
   }
   return () => {
+    // Unsubscribe idle work as well as events before this scroll root is released.
+    targetWindow.clearTimeout(timeoutId)
     element.removeEventListener('scroll', handler)
     if (registerScrollendEvent) {
       element.removeEventListener('scrollend', endHandler)

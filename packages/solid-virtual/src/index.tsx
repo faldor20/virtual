@@ -86,8 +86,8 @@ function createVirtualizerBase<
   const diagnosticsId = virtualizerInstanceId(instance)
   let disposed = false
   const cleanup = instance._didMount()
-  // Offset observers can deliver their scrolling-stopped debounce after unmount.
-  // Never let that callback reattach this instance to a shared Pane scroll root.
+  // Options can attach observers before first settle, so register cleanup now.
+  // Late callbacks must never reattach a disposed instance to its scroll root.
   onCleanup(() => {
     disposed = true
     cleanup()
