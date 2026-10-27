@@ -99,6 +99,11 @@ function createVirtualizerBase<
   // clobbers a scrolled shared root. Only that path (scroll element change)
   // needs a live-offset seed/restore; count/margin updates keep the same
   // element and must not force layout through a scrollTop read.
+  //
+  // A caller that supplies `initialOffset` (the root owner's cached offset)
+  // skips both the read and the rebind write: the element already sits at
+  // that offset, and either access would force layout mid-flush.
+  const suppliedInitialOffset = untrack(() => options.initialOffset !== undefined)
   type ScrollOffsetInternals = {
     scrollElement: TScrollElement | null
     scrollOffset: number | null
@@ -139,6 +144,17 @@ function createVirtualizerBase<
     // Match virtual-core: only a scroll-element rebind can apply initialOffset.
     if (internals.scrollElement === nextScrollElement) {
       rawWillUpdate()
+      return
+    }
+    if (suppliedInitialOffset) {
+      const { scrollToFn } = instance.options
+      instance.options.scrollToFn = () => {}
+      try {
+        rawWillUpdate()
+      } finally {
+        instance.options.scrollToFn = scrollToFn
+      }
+      countVirtualRelayout('virtualizer.willUpdateSeedSupplied')
       return
     }
     const el = nextScrollElement
