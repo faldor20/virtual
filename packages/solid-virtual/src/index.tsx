@@ -43,6 +43,12 @@ type SolidVirtualizerOptions<
    * this effect (they already flow through the owner's remeasure path).
    */
   estimateVersion?: () => number
+  /**
+   * Queues the post-paint re-observe pass (RO rebind + first measure). The
+   * default runs it on the next frame; a host whose rows are tweening can hold
+   * it and release it once. Must invoke `run` exactly once, late.
+   */
+  postPaintMeasureQueue?: (run: () => void) => void
 }
 
 type DevToolsConsole = Console & {
@@ -400,10 +406,35 @@ function createVirtualizerBase<
   let previousItemKeys: readonly unknown[] | undefined
   let previousScrollElement: Element | Window | null | undefined
   // Coalesce options-effect remeasures when count/options churn within one frame.
+  // `reObserveQueued` also covers a host-held pass, which has no frame handle.
+  let reObserveQueued = false
   let reObserveRaf = 0
   onCleanup(() => {
+    reObserveQueued = false
     if (reObserveRaf) cancelAnimationFrame(reObserveRaf)
   })
+
+  /** One post-paint re-observe pass: next frame, or when a holding host releases it. */
+  const queuePostPaintMeasure = () => {
+    if (reObserveQueued) return
+    reObserveQueued = true
+    const run = () => {
+      reObserveQueued = false
+      reObserveRaf = 0
+      if (disposed) return
+      reObserveAndMeasureLive(virtualizer)
+    }
+    const queue = options.postPaintMeasureQueue
+    if (queue) {
+      queue(run)
+      return
+    }
+    if (typeof requestAnimationFrame === "function") {
+      reObserveRaf = requestAnimationFrame(run)
+    } else {
+      run()
+    }
+  }
 
   createEffect(
     () => ({
@@ -505,21 +536,11 @@ function createVirtualizerBase<
           'Outlier',
           'secondary',
         )
-        // Real measurement follows on the next frame (same philosophy as
-        // reObserveAndMeasureLive: geometry reads belong post-paint, not on
-        // the mutation task). Guarded: the steady-state branch below may have
-        // already scheduled this frame's pass. No rAF (Node tests) → run the
-        // pass inline; with no scroll element it early-returns after recording.
-        if (!reObserveRaf) {
-          if (typeof requestAnimationFrame === "function") {
-            reObserveRaf = requestAnimationFrame(() => {
-              reObserveRaf = 0
-              reObserveAndMeasureLive(virtualizer)
-            })
-          } else {
-            reObserveAndMeasureLive(virtualizer)
-          }
-        }
+        // Real measurement follows post-paint (same philosophy as
+        // reObserveAndMeasureLive: geometry reads belong after the paint, not on
+        // the mutation task). No rAF (Node tests) → run the pass inline; with no
+        // scroll element it early-returns after recording.
+        queuePostPaintMeasure()
       } else if (layoutUnchanged) {
         // Island-local work (or any same-keys/count/margin/estimate pass):
         // measurements, keys, and estimates all hold, so there is nothing to
@@ -575,11 +596,7 @@ function createVirtualizerBase<
         )
         // After paint: data-index is settled; avoid forced layout on the click
         // microtask (see reObserveAndMeasureLive).
-        if (reObserveRaf) return
-        reObserveRaf = requestAnimationFrame(() => {
-          reObserveRaf = 0
-          reObserveAndMeasureLive(virtualizer)
-        })
+        queuePostPaintMeasure()
       }
     },
   )
